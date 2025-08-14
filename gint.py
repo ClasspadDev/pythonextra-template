@@ -11,11 +11,14 @@ DWIDTH = 320
 DHEIGHT = 528
 
 C_WHITE = 0xFFFF
+C_LIGHT = 0xad55
+C_DARK  = 0x528a
 C_BLACK = 0x0000
 C_RED = 0b11111_000000_00000
 C_GREEN = 0b00000_111111_00000
 C_BLUE = 0b00000_000000_11111
 C_NONE = -1
+C_INVERT = -2
 
 # Text alignment constants
 DTEXT_LEFT = 'left'
@@ -38,6 +41,8 @@ vram = pygame.Surface((DWIDTH, DHEIGHT))
 clock = pygame.time.Clock()
 FPS = 100  # Adjust to control game speed
 
+# --- NEW: Window Clipping State ---
+_dwindow = (0, 0, DWIDTH, DHEIGHT)
 
 def _to_rgb(color: int) -> tuple:
     """Convert RGB888 int to pygame color tuple"""
@@ -68,6 +73,19 @@ def C_RGB(r: int, g: int, b: int) -> int:
     # b8 = (b << 3) | (b >> 2)
     # return (r8 << 16) | (g8 << 8) | b8
     return ((r & 0x1F) << 11) | ((g & 0x3F) << 6) | (b & 0x1F)
+
+def dwindow_get() -> Tuple[int, int, int, int]:
+    """Get the current rendering window clipping rectangle."""
+    return _dwindow
+
+def dwindow_set(left: int, top: int, right: int, bottom: int):
+    """Set the rendering window to clip drawing operations."""
+    global _dwindow
+    _dwindow = (left, top, right, bottom)
+    
+    # Use pygame's built-in clipping for efficiency
+    clip_rect = pygame.Rect(left, top, right - left, bottom - top)
+    vram.set_clip(clip_rect)
 
 # Drawing functions
 def dclear(color: int):
@@ -264,6 +282,57 @@ def _get_glyph(font: GintFont, char: str):
     _font_cache[code] = (glyph, width)
     return glyph, width
 
+def dsize(text: str, font: Optional[GintFont]) -> Tuple[int, int]:
+    """Get the width and height of rendered text."""
+    if not text:
+        return 0, GLYPH_HEIGHT
+    
+    font = font or _current_font
+    
+    widths = [_get_glyph(font, c)[1] for c in text]
+    # Sum of glyph widths + spacing between them
+    total_width = sum(widths) + (len(text) - 1) * font.char_spacing
+    
+    return total_width, GLYPH_HEIGHT
+
+def dnsize(text: str, size: int, font: Optional[GintFont]) -> Tuple[int, int]:
+    """Get the width and height of a prefix of a rendered text."""
+    if size < 0:
+        return dsize(text, font)
+    
+    # Simulate byte limit by encoding, slicing, and decoding
+    limited_text = text.encode('utf-8')[:size].decode('utf-8', errors='ignore')
+    return dsize(limited_text, font)
+
+def drsize(text: str, font: Optional[GintFont], width: int) -> Tuple[int, int]:
+    """
+    Determine how many characters fit in a given width.
+
+    Note:
+        The returned byte_offset is not reliable for slicing strings that
+        contain multi-byte Unicode characters. Slicing with `str[:offset]`
+        may fail. This is a known issue.
+    """
+    font = font or _current_font
+    byte_offset = 0
+    actual_width = 0
+    
+    for i, char in enumerate(text):
+        glyph_w = _get_glyph(font, char)[1]
+        
+        # Width this character would occupy (including preceding space)
+        char_total_w = glyph_w + (font.char_spacing if i > 0 else 0)
+        
+        if actual_width + char_total_w > width:
+            break # Character does not fit, stop here.
+        
+        # It fits, commit the changes
+        actual_width += char_total_w
+        byte_offset += len(char.encode('utf-8'))
+        
+    return byte_offset, actual_width
+
+
 # Updated text rendering with precise spacing
 def dtext(x: int, y: int, color: int, text: str,
           align=DTEXT_LEFT, valign=DTEXT_TOP):
@@ -273,9 +342,10 @@ def dtext(x: int, y: int, color: int, text: str,
     font = _current_font or _default_font
     
     # Calculate total width and heights
-    widths = [_get_glyph(font, c)[1] for c in text]
-    total_width = sum(widths)
-    total_height = GLYPH_HEIGHT
+    # widths = [_get_glyph(font, c)[1] for c in text]
+    # total_width = sum(widths)
+    # total_height = GLYPH_HEIGHT
+    total_width, total_height = dsize(text, font)
     
     # Horizontal alignment
     if align == DTEXT_CENTER:
@@ -291,16 +361,16 @@ def dtext(x: int, y: int, color: int, text: str,
     
     # Draw each character
     cursor_x = x
-    for char, width in zip(text, widths):
-        glyph, _ = _get_glyph(font, char)
+    for char in text:
+        glyph, width = _get_glyph(font, char)
         
         # Create colored glyph
         mask = pygame.mask.from_surface(glyph)
         colored = pygame.Surface(glyph.get_size(), pygame.SRCALPHA)
         mask.to_surface(colored, setcolor=_to_rgb(color), unsetcolor=(0,0,0,0))
         
-        vram.blit(colored, (cursor_x- GAP, y - GAP))
-        cursor_x += width + GAP
+        vram.blit(colored, (cursor_x - GAP, y - GAP))
+        cursor_x += width + font.char_spacing
 
 
 def dtext_opt(x: int, y: int, fg: int, bg: int, 
@@ -308,19 +378,9 @@ def dtext_opt(x: int, y: int, fg: int, bg: int,
     if not text:
         return
     
-    font= _current_font or _default_font
+    font = _current_font or _default_font
+    total_width, total_height = dsize(text, font)
 
-    widths = [_get_glyph(font, c)[1] for c in text]
-    total_width = 0
-    glyphs = []
-    total_width = sum(widths)
-    total_height = GLYPH_HEIGHT
-
-    # Calculate metrics
-    for char in text:
-        glyph, width = _get_glyph(font, char)
-        glyphs.append((glyph, width))
-        total_width += width + font.char_spacing
 
     # Horizontal alignment
     if halign == DTEXT_CENTER:
@@ -345,8 +405,8 @@ def dtext_opt(x: int, y: int, fg: int, bg: int,
     
     # Draw text characters
     cursor_x = x
-    for char, width in zip(text, widths):
-        glyph, _ = _get_glyph(font, char)
+    for char in text:
+        glyph, width = _get_glyph(font, char)
         
         # Create colored glyph
         mask = pygame.mask.from_surface(glyph)
@@ -354,7 +414,7 @@ def dtext_opt(x: int, y: int, fg: int, bg: int,
         mask.to_surface(colored, setcolor=_to_rgb(fg), unsetcolor=(0,0,0,0))
         
         vram.blit(colored, (cursor_x - GAP, y - GAP))
-        cursor_x += width + GAP
+        cursor_x += width + font.char_spacing
 
 # Key Events
 
@@ -966,6 +1026,123 @@ def dsubimage(x: int, y: int, img: Image,
     sub_rect = pygame.Rect(left, top, width, height)
     sub_surf = img.surface.subsurface(sub_rect)
     vram.blit(sub_surf, (x, y))
+
+#  --- Polyfill
+    
+import time
+import gc
+import sys
+import traceback
+from typing import Any, Optional
+
+# Polyfill for time.sleep_ms() and time.sleep_us()
+if not hasattr(time, 'sleep_ms'):
+    def time_sleep_ms(ms: int):
+        """Polyfill for time.sleep_ms. Pauses execution for a number of milliseconds."""
+        time.sleep(ms / 1000.0)
+    time.sleep_ms = time_sleep_ms
+
+if not hasattr(time, 'sleep_us'):
+    def time_sleep_us(us: int):
+        """Polyfill for time.sleep_us. Pauses execution for a number of microseconds."""
+        time.sleep(us / 1_000_000.0)
+    time.sleep_us = time_sleep_us
+
+if not hasattr(time, 'ticks_ms'):
+    TICKS_PERIOD = 2**30
+    TICKS_MAX = TICKS_PERIOD - 1
+    TICKS_HALF_PERIOD = TICKS_PERIOD // 2
+
+    def ticks_ms() -> int:
+        """Polyfill for time.ticks_ms. Returns a wrapping millisecond counter."""
+        return int(time.monotonic() * 1000) & TICKS_MAX
+
+    def ticks_us() -> int:
+        """Polyfill for time.ticks_us. Returns a wrapping microsecond counter."""
+        return int(time.monotonic() * 1_000_000) & TICKS_MAX
+
+    def ticks_cpu() -> int:
+        """Polyfill for time.ticks_cpu. Alias to ticks_us for simulation."""
+        return ticks_us()
+
+    def ticks_add(ticks: int, delta: int) -> int:
+        """Polyfill for time.ticks_add. Correctly adds a value to a wrapping ticks counter."""
+        return (ticks + delta) & TICKS_MAX
+
+    def ticks_diff(ticks1: int, ticks2: int) -> int:
+        """Polyfill for time.ticks_diff. Correctly finds the difference between two wrapping ticks values."""
+        return ((ticks1 - ticks2 + TICKS_HALF_PERIOD) & TICKS_MAX) - TICKS_HALF_PERIOD
+
+    time.ticks_ms = ticks_ms
+    time.ticks_us = ticks_us
+    time.ticks_cpu = ticks_cpu
+    time.ticks_add = ticks_add
+    time.ticks_diff = ticks_diff
+
+# Polyfills for MicroPython-specific gc functions
+if not hasattr(gc, 'mem_alloc'):
+    def gc_mem_alloc() -> int:
+        """Polyfill for gc.mem_alloc. Not implementable in CPython, returns 0."""
+        print("Warning: gc.mem_alloc() is a MicroPython-specific function. Returning 0.")
+        return 0
+    gc.mem_alloc = gc_mem_alloc
+
+if not hasattr(gc, 'mem_free'):
+    def gc_mem_free() -> int:
+        """Polyfill for gc.mem_free. Not implementable in CPython, returns a large number."""
+        print("Warning: gc.mem_free() is a MicroPython-specific function. Returning a dummy value.")
+        # Return a large number to avoid false "out of memory" errors in simulations
+        return 1024 * 1024
+    gc.mem_free = gc_mem_free
+
+if not hasattr(gc, 'threshold'):
+    def gc_threshold(amount: Optional[int] = None) -> int:
+        """Polyfill for gc.threshold. Simulates getting/setting the threshold."""
+        current_thresholds = gc.get_threshold()
+        if amount is not None:
+            print(f"Warning: gc.threshold() is a MicroPython-specific function. Setting a dummy value.")
+            # We can't really set it in the same way, but we can fake it.
+            # This doesn't actually do anything in CPython.
+            pass
+        return current_thresholds[0]
+    gc.threshold = gc_threshold
+
+# Create a dummy micropython module since it doesn't exist in standard Python
+class MicroPythonModule:
+    def const(self, expr: Any) -> Any:
+        """Polyfill for micropython.const. Returns the expression as-is."""
+        return expr
+
+    def opt_level(self, level: Optional[int] = None) -> int:
+        """Polyfill for micropython.opt_level. Does nothing and returns 0."""
+        if level is not None:
+            print(f"Warning: micropython.opt_level({level}) called. No effect in CPython.")
+        return 0
+
+    def heap_lock(self) -> int:
+        """Polyfill for micropython.heap_lock. Does nothing and returns 0."""
+        return 0
+
+    def heap_unlock(self) -> int:
+        """Polyfill for micropython.heap_unlock. Does nothing and returns 0."""
+        return 0
+    
+    def kbd_intr(self, chr_val: int):
+        """Polyfill for micropython.kbd_intr. Does nothing."""
+        pass
+
+# Add the dummy module to sys.modules
+if 'micropython' not in sys.modules:
+    sys.modules['micropython'] = MicroPythonModule()
+
+
+if not hasattr(sys, 'print_exception'):
+    def sys_print_exception(exc: Exception, file=sys.stdout):
+        """
+        Polyfill for sys.print_exception. Uses the standard `traceback` module.
+        """
+        traceback.print_exception(type(exc), exc, exc.__traceback__, file=file)
+    sys.print_exception = sys_print_exception
 
 #  --- INIT STUFF
     

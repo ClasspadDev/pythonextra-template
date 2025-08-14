@@ -62,6 +62,10 @@ When prompted "Do you want to install the recommended 'Python' extension from Mi
 
 It's important, otherwise some nice features won't work.
 
+To run the web preview, go to menu > "Terminal" > "Run Task..." and select the "Open VNC in SimpleBrowser". Put the newly opened panel on the right side and you're good to run and preview your program :
+
+![Run GUI under VNC](.docs/runpy.png)
+
 ## Install to the calculator
 
 Mount your classpad to your PC as USB storage device and copy the `bounce.py` (or your program) to the calculator.
